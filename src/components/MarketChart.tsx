@@ -6,17 +6,75 @@
 import { useState, useMemo } from 'react';
 import { 
   AreaChart, Area, Line, XAxis, YAxis, CartesianGrid, 
-  Tooltip, ResponsiveContainer, BarChart, Bar 
+  Tooltip, ResponsiveContainer, BarChart, Bar, ComposedChart
 } from 'recharts';
-import { TrendingUp, TrendingDown, Activity, Eye } from 'lucide-react';
-import { Asset, HistoricalDataPoint } from '../types';
+import { TrendingUp, TrendingDown, Activity } from 'lucide-react';
+import { Asset } from '../types';
 
 interface MarketChartProps {
   selectedAsset: Asset;
 }
 
+// Custom shape for Recharts Bar element to render beautiful candlestick candles
+const CandlestickShape = (props: any) => {
+  const { x, width, payload, yAxis } = props;
+  if (!payload) return null;
+
+  const { open, close, high, low } = payload;
+  const isUp = close >= open;
+  const color = isUp ? '#10b981' : '#f43f5e';
+
+  let yOpen, yClose, yHigh, yLow;
+
+  if (yAxis && typeof yAxis.scale === 'function') {
+    yOpen = yAxis.scale(open);
+    yClose = yAxis.scale(close);
+    yHigh = yAxis.scale(high);
+    yLow = yAxis.scale(low);
+  } else {
+    // Fallback if scale function is not available
+    const { y, height } = props;
+    const bodyHeight = Math.max(2, height);
+    const priceDiff = Math.abs(open - close) || 0.0001;
+    const pixelsPerPrice = bodyHeight / priceDiff;
+    yOpen = isUp ? y : y + bodyHeight;
+    yClose = isUp ? y + bodyHeight : y;
+    yHigh = y - (high - Math.max(open, close)) * pixelsPerPrice;
+    yLow = y + bodyHeight + (Math.min(open, close) - low) * pixelsPerPrice;
+  }
+
+  const centerX = x + width / 2;
+  const rectY = Math.min(yOpen, yClose);
+  const rectHeight = Math.max(2, Math.abs(yOpen - yClose));
+
+  return (
+    <g>
+      {/* Wick / Shadow line */}
+      <line
+        x1={centerX}
+        y1={yHigh}
+        x2={centerX}
+        y2={yLow}
+        stroke={color}
+        strokeWidth={1.5}
+      />
+      {/* Candle Body */}
+      <rect
+        x={x}
+        y={rectY}
+        width={width}
+        height={rectHeight}
+        fill={isUp ? '#10b981' : '#f43f5e'}
+        stroke={color}
+        strokeWidth={1}
+        rx={1.5}
+      />
+    </g>
+  );
+};
+
 export default function MarketChart({ selectedAsset }: MarketChartProps) {
-  const [chartType, setChartType] = useState<'area' | 'line'>('area');
+  const [chartType, setChartType] = useState<'area' | 'line' | 'candle'>('area');
   const [timeRange, setTimeRange] = useState<'5m' | '1h' | '24h' | 'ALL'>('24h');
   const [showSMA, setShowSMA] = useState(false);
   const [showEMA, setShowEMA] = useState(false);
@@ -36,11 +94,26 @@ export default function MarketChart({ selectedAsset }: MarketChartProps) {
     return selectedAsset.history;
   }, [selectedAsset.history, timeRange]);
 
-  // Calculate moving averages dynamically
+  // Calculate moving averages dynamically and utilize existing candle values or fallback
   const enrichedData = useMemo(() => {
-    const data = filteredData.map(d => ({ ...d }));
+    const data = filteredData.map((d, i) => {
+      const price = d.price;
+      const open = d.open !== undefined ? d.open : (i > 0 ? (filteredData[i - 1].close ?? filteredData[i - 1].price) : price * 0.995);
+      const close = d.close !== undefined ? d.close : price;
+      const high = d.high !== undefined ? d.high : Math.max(open, close) + (Math.abs(open - close) * 0.15 + price * 0.001);
+      const low = d.low !== undefined ? d.low : Math.min(open, close) - (Math.abs(open - close) * 0.15 + price * 0.001);
+
+      return {
+        ...d,
+        open,
+        close,
+        high,
+        low,
+        candle: [Math.min(open, close), Math.max(open, close)]
+      };
+    });
     
-    // SMA 10 Period
+    // SMA 8 Period
     const windowSize = 8;
     for (let i = 0; i < data.length; i++) {
       if (i >= windowSize - 1) {
@@ -54,7 +127,7 @@ export default function MarketChart({ selectedAsset }: MarketChartProps) {
       }
     }
 
-    // EMA 10 Period
+    // EMA 8 Period
     const k = 2 / (windowSize + 1);
     let prevEma = data[0]?.price || 0;
     for (let i = 0; i < data.length; i++) {
@@ -69,17 +142,30 @@ export default function MarketChart({ selectedAsset }: MarketChartProps) {
 
   const isPositive = selectedAsset.change24h >= 0;
   const strokeColor = isPositive ? '#10b981' : '#f43f5e';
-  const fillColor = isPositive ? 'rgba(16, 185, 129, 0.12)' : 'rgba(244, 63, 94, 0.12)';
 
-  // Find min and max for chart scale adaptation
-  const prices = filteredData.map(d => d.price);
-  const maxPrice = Math.max(...prices);
-  const minPrice = Math.min(...prices);
-  const paddingRatio = (maxPrice - minPrice) * 0.05 || selectedAsset.price * 0.01;
-  const yDomain = [
-    parseFloat((minPrice - paddingRatio).toFixed(selectedAsset.price > 1000 ? 0 : 2)),
-    parseFloat((maxPrice + paddingRatio).toFixed(selectedAsset.price > 1000 ? 0 : 2))
-  ];
+  // Find min and max for chart scale adaptation including wicks if candlestick is active
+  const yDomain = useMemo(() => {
+    if (chartType === 'candle') {
+      const highs = enrichedData.map(d => d.high);
+      const lows = enrichedData.map(d => d.low);
+      const maxH = Math.max(...highs, selectedAsset.price);
+      const minL = Math.min(...lows, selectedAsset.price);
+      const padding = (maxH - minL) * 0.08 || selectedAsset.price * 0.01;
+      return [
+        parseFloat((minL - padding).toFixed(selectedAsset.price > 1000 ? 0 : 4)),
+        parseFloat((maxH + padding).toFixed(selectedAsset.price > 1000 ? 0 : 4))
+      ];
+    } else {
+      const prices = filteredData.map(d => d.price);
+      const maxPrice = Math.max(...prices, selectedAsset.price);
+      const minPrice = Math.min(...prices, selectedAsset.price);
+      const paddingRatio = (maxPrice - minPrice) * 0.05 || selectedAsset.price * 0.01;
+      return [
+        parseFloat((minPrice - paddingRatio).toFixed(selectedAsset.price > 1000 ? 0 : 4)),
+        parseFloat((maxPrice + paddingRatio).toFixed(selectedAsset.price > 1000 ? 0 : 4))
+      ];
+    }
+  }, [enrichedData, filteredData, chartType, selectedAsset.price]);
 
   return (
     <div className="bg-slate-900/40 backdrop-blur-xl border border-slate-800/60 rounded-2xl p-6 flex flex-col h-full shadow-2xl relative" id="trading-chart-widget">
@@ -164,16 +250,23 @@ export default function MarketChart({ selectedAsset }: MarketChartProps) {
             <button
               id="charttype-btn-area"
               onClick={() => setChartType('area')}
-              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${chartType === 'area' ? 'bg-slate-800 text-emerald-400 font-extrabold border border-slate-700/50 shadow-sm' : 'hover:text-white'}`}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${chartType === 'area' ? 'bg-slate-800 text-emerald-400 font-extrabold border border-slate-700/50 shadow-sm' : 'hover:text-white hover:bg-slate-900/30'}`}
             >
               Area
             </button>
             <button
               id="charttype-btn-line"
               onClick={() => setChartType('line')}
-              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${chartType === 'line' ? 'bg-slate-800 text-emerald-400 font-extrabold border border-slate-700/50 shadow-sm' : 'hover:text-white'}`}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${chartType === 'line' ? 'bg-slate-800 text-emerald-400 font-extrabold border border-slate-700/50 shadow-sm' : 'hover:text-white hover:bg-slate-900/30'}`}
             >
               Line
+            </button>
+            <button
+              id="charttype-btn-candle"
+              onClick={() => setChartType('candle')}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${chartType === 'candle' ? 'bg-slate-800 text-emerald-400 font-extrabold border border-slate-700/50 shadow-sm' : 'hover:text-white hover:bg-slate-900/30'}`}
+            >
+              Candle
             </button>
           </div>
         </div>
@@ -241,7 +334,7 @@ export default function MarketChart({ selectedAsset }: MarketChartProps) {
                 />
               )}
             </AreaChart>
-          ) : (
+          ) : chartType === 'line' ? (
             <AreaChart data={enrichedData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.3} />
               <XAxis 
@@ -292,6 +385,95 @@ export default function MarketChart({ selectedAsset }: MarketChartProps) {
                 />
               )}
             </AreaChart>
+          ) : (
+            <ComposedChart data={enrichedData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.3} />
+              <XAxis 
+                dataKey="time" 
+                stroke="#475569" 
+                fontSize={9} 
+                tickLine={false}
+                axisLine={false}
+              />
+              <YAxis 
+                domain={yDomain}
+                stroke="#475569" 
+                fontSize={9} 
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(val) => `$${val.toLocaleString()}`}
+              />
+              <Tooltip
+                contentStyle={{ backgroundColor: '#020617', borderColor: '#334155', borderRadius: '12px', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.5)' }}
+                labelStyle={{ color: '#94a3b8', fontSize: '10px', fontWeight: 'bold' }}
+                itemStyle={{ color: '#ffffff', fontSize: '11px', fontFamily: 'monospace' }}
+                content={(tooltipProps) => {
+                  const { active, payload } = tooltipProps;
+                  if (active && payload && payload.length) {
+                    const data = payload[0].payload;
+                    const decimalDigits = selectedAsset.price > 1000 ? 1 : selectedAsset.price < 2 ? 4 : 2;
+                    return (
+                      <div className="bg-slate-950/95 backdrop-blur-md border border-slate-800 p-3.5 rounded-xl shadow-2xl text-[11px] font-mono text-slate-350 space-y-1.5 min-w-[150px]">
+                        <div className="text-slate-500 font-bold border-b border-slate-900 pb-1 mb-1">{data.time}</div>
+                        <div className="flex justify-between gap-4">
+                          <span className="text-slate-450">Open:</span>
+                          <span className="text-white font-bold">${data.open.toLocaleString(undefined, { minimumFractionDigits: decimalDigits, maximumFractionDigits: decimalDigits })}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span className="text-slate-450">High:</span>
+                          <span className="text-emerald-400 font-bold">${data.high.toLocaleString(undefined, { minimumFractionDigits: decimalDigits, maximumFractionDigits: decimalDigits })}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span className="text-slate-450">Low:</span>
+                          <span className="text-rose-455 font-bold">${data.low.toLocaleString(undefined, { minimumFractionDigits: decimalDigits, maximumFractionDigits: decimalDigits })}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span className="text-slate-450">Close:</span>
+                          <span className="text-white font-bold">${data.close.toLocaleString(undefined, { minimumFractionDigits: decimalDigits, maximumFractionDigits: decimalDigits })}</span>
+                        </div>
+                        {showSMA && data.sma !== undefined && (
+                          <div className="flex justify-between gap-4 border-t border-slate-900 pt-1 mt-1 text-blue-400">
+                            <span>SMA(8):</span>
+                            <span className="font-bold">${data.sma.toLocaleString(undefined, { minimumFractionDigits: decimalDigits, maximumFractionDigits: decimalDigits })}</span>
+                          </div>
+                        )}
+                        {showEMA && data.ema !== undefined && (
+                          <div className="flex justify-between gap-4 text-purple-400">
+                            <span>EMA(8):</span>
+                            <span className="font-bold">${data.ema.toLocaleString(undefined, { minimumFractionDigits: decimalDigits, maximumFractionDigits: decimalDigits })}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
+              <Bar 
+                dataKey="candle" 
+                shape={<CandlestickShape />}
+              />
+              {showSMA && (
+                <Line 
+                  type="monotone" 
+                  dataKey="sma" 
+                  stroke="#3b82f6" 
+                  strokeWidth={1.5} 
+                  dot={false}
+                  name="SMA 8"
+                />
+              )}
+              {showEMA && (
+                <Line 
+                  type="monotone" 
+                  dataKey="ema" 
+                  stroke="#a855f7" 
+                  strokeWidth={1.5} 
+                  dot={false}
+                  name="EMA 8"
+                />
+              )}
+            </ComposedChart>
           )}
         </ResponsiveContainer>
       </div>

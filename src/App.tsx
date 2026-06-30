@@ -154,18 +154,45 @@ export default function App() {
         const low24h = Math.min(asset.low24h, newPrice);
         const dailyShiftPercent = asset.change24h + (priceChangeRatio * 100);
 
-        // Append historical points limits (up to max 100 points)
+        // 15-second grouping for real-time dynamic candle updates (exactly like TradingView)
         const updatedHistory = [...asset.history];
-        if (updatedHistory.length >= 100) {
-          updatedHistory.shift();
+        const now = new Date();
+        const minutes = now.getMinutes().toString().padStart(2, '0');
+        const secondsVal = Math.floor(now.getSeconds() / 15) * 15;
+        const secondsStr = secondsVal.toString().padStart(2, '0');
+        const candleTimeStr = `${now.getHours().toString().padStart(2, '0')}:${minutes}:${secondsStr}`;
+
+        const volumeTick = Math.round(asset.volume24h * 0.0001 * (1 + Math.abs(priceChangeRatio) * 5));
+        const lastPoint = updatedHistory.length > 0 ? { ...updatedHistory[updatedHistory.length - 1] } : null;
+
+        if (lastPoint && lastPoint.time === candleTimeStr) {
+          lastPoint.price = newPrice;
+          lastPoint.close = newPrice;
+          lastPoint.high = Math.max(lastPoint.high ?? newPrice, newPrice);
+          lastPoint.low = Math.min(lastPoint.low ?? newPrice, newPrice);
+          lastPoint.volume += volumeTick;
+          updatedHistory[updatedHistory.length - 1] = lastPoint;
+        } else {
+          const previousClose = lastPoint ? (lastPoint.close ?? lastPoint.price) : newPrice;
+          const open = previousClose;
+          const close = newPrice;
+          const high = Math.max(open, close);
+          const low = Math.min(open, close);
+
+          updatedHistory.push({
+            time: candleTimeStr,
+            price: newPrice,
+            volume: volumeTick,
+            open,
+            high,
+            low,
+            close,
+          });
+
+          if (updatedHistory.length >= 120) {
+            updatedHistory.shift();
+          }
         }
-        
-        const timestampFormat = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        updatedHistory.push({
-          time: timestampFormat,
-          price: newPrice,
-          volume: Math.round(asset.volume24h * 0.001 * (1 + Math.abs(priceChangeRatio) * 5))
-        });
 
         return {
           ...asset,

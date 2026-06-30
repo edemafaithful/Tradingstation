@@ -13,7 +13,7 @@ export function generateHistory(
   drift = 0.0002
 ): HistoricalDataPoint[] {
   const history: HistoricalDataPoint[] = [];
-  let currentPrice = basePrice * 0.9; // Start a bit lower
+  let currentPrice = basePrice * 0.95; // Start a bit lower
   
   // Set starting timestamp (e.g., past 24 hours in steps)
   const now = new Date();
@@ -21,15 +21,27 @@ export function generateHistory(
   for (let i = pointsCount - 1; i >= 0; i--) {
     const time = new Date(now.getTime() - i * 5 * 60 * 1000); // 5 minute intervals
     const changePercent = (Math.random() - 0.5 + drift) * volatility;
-    currentPrice = currentPrice * (1 + changePercent);
+    const open = parseFloat(currentPrice.toFixed(2));
+    const close = parseFloat((currentPrice * (1 + changePercent)).toFixed(2));
+    currentPrice = close;
+
+    const bodyDiff = Math.abs(open - close);
+    const noise = (bodyDiff * (0.1 + Math.random() * 0.4)) + (open * 0.001);
+    const high = parseFloat((Math.max(open, close) + noise).toFixed(2));
+    const low = parseFloat((Math.min(open, close) - noise).toFixed(2));
+
     // Standard volume model based on price shifts
     const baseVolume = basePrice * (50 + Math.random() * 300);
     const volume = Math.round(baseVolume * (1 + Math.abs(changePercent) * 10));
 
     history.push({
       time: time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      price: parseFloat(currentPrice.toFixed(2)),
+      price: close,
       volume,
+      open,
+      high,
+      low,
+      close,
     });
   }
 
